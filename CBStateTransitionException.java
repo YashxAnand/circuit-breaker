@@ -1,4 +1,4 @@
-public class CBStateTransitionException extends Exception{
+public class CBStateTransitionException extends RuntimeException{
     public CBStateTransitionException(String message){
         super(message);
     }
