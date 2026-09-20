@@ -2,7 +2,7 @@ interface ICBState{
     CBStates getState();
 
     default void close(CircuitBreaker context){
-        throw new CBStateTransitionException("Can't move to close state from current state!")
+        throw new CBStateTransitionException("Can't move to close state from current state!");
     }
 
     default void halfOpen(CircuitBreaker context){
