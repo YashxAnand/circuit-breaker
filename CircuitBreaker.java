@@ -1,5 +1,6 @@
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantLock;
 
 public class CircuitBreaker{
     private final AtomicReference<ICBState> currentState;
@@ -8,14 +9,22 @@ public class CircuitBreaker{
     private AtomicLong totalRequestsInWindow;
     private AtomicLong failureRequests;
     private final long minRequestCount;
-    private final long failureThreshold;
+    private final int failureThreshold;
     private final int halfOpenPercent;
+    private final long openWindowTimeout;
 
     public static class Builder{
         private long windowTimeM = 2000;
         private long minRequestCount = 10;
-        private long failureThreshold = 50;
+        private int failureThreshold = 50;
         private int halfOpenPercent = 20;
+        private long openWindowTimeout = 5000;
+        
+        public Builder openWindowTimeout(long openWindowTimeout){
+            this.openWindowTimeout = openWindowTimeout;
+
+            return this;
+        }
 
         public Builder windowTimeM(long windowTimeM){
             this.windowTimeM = windowTimeM;
@@ -29,7 +38,7 @@ public class CircuitBreaker{
             return this;
         }
 
-        public Builder failureThreshold(long failureThreshold){
+        public Builder failureThreshold(int failureThreshold){
             this.failureThreshold = failureThreshold;
 
             return this;
@@ -49,16 +58,106 @@ public class CircuitBreaker{
     private CircuitBreaker(Builder builder){
         this.currentState = new AtomicReference<>(new ClosedCBState());
         this.lastWindowResetM = new AtomicLong(System.currentTimeMillis());
-        this.lastWindowResetM = builder.lastWindowResetM;
         this.windowTimeM = builder.windowTimeM;
         this.totalRequestsInWindow = new AtomicLong(0);
         this.failureRequests = new AtomicLong(0);
         this.minRequestCount = builder.minRequestCount;
         this.failureThreshold = builder.failureThreshold;
         this.halfOpenPercent = builder.halfOpenPercent;
+        this.openWindowTimeout = builder.openWindowTimeout;
+        this.lock = new ReentrantLock();
     }
 
     public void setState(ICBState state){
         this.currentState.set(state);
+    }
+
+    private void checkWindowReset(){
+        if(this.currentState.get().getState().equals(CBStates.HALF_OPEN))
+            return;
+        CBStates currState = this.currentState.get().getState();
+
+        long lastResetLongValue = lastWindowResetM.get();
+
+        if(System.currentTimeMillis() - lastResetLongValue >= (currState.equals(CBStates.OPEN)?openWindowTimeout:windowTimeM)){
+            if(lastWindowResetM.compareAndSet(lastResetLongValue, System.currentTimeMillis())){
+                totalRequestsInWindow.set(0);
+                failureRequests.set(0);
+
+                if(this.currentState.get().getState().equals(CBStates.OPEN))
+                    this.currentState.compareAndSet(CBStates.OPEN, CBStates.HALF_OPEN);
+            }
+        }
+    }
+
+    private boolean isAllowed(){
+        checkWindowReset();
+        CBStates currentState = this.currentState.get().getState();
+
+        if(currentState.equals(CBStates.CLOSED)){
+            this.totalRequestsInWindow.incrementAndGet();
+            return true;
+        } else if(currentState.equals(CBStates.HALF_OPEN)){
+            int requestNumber = totalRequestsInWindow.incrementAndGet();
+            int allowedN = 100/halfOpenPercent;
+
+            return (requestNumber%allowedN) == 0;
+        } 
+
+        return false;
+    }
+
+    private void onSuccess(){
+        if(this.currentState.get().getState().equals(CBStates.HALF_OPEN)){
+            if(this.currentState.compareAndSet(CBStates.HALF_OPEN, CBStates.CLOSED)){
+                this.lastWindowResetM.set(System.currentTimeMillis());
+                this.totalRequestsInWindow.set(0);
+                this.failureRequests.set(0);
+            }
+        }
+    }
+
+    private void onFailure(){
+        CBStates currState = this.currentState.get().getState();
+
+        if(currState.equals(CBStates.HALF_OPEN)){
+            if(this.currentState.compareAndSet(currState, CBStates.OPEN)){
+                this.lastWindowResetM = System.currentTimeMillis;
+                this.totalRequestsInWindow.set(0);
+                this.failureRequests.set(0);
+            }
+        }
+
+        //If closed
+        long failureCount = this.failureRequests.incrementAndGet();
+        long totalRequests = totalRequestsInWindow.get();
+
+        if(totalRequestsInWindow.get() > minRequestCount){
+            int failurePercent = (failureCount * 100.0) / totalRequests;
+
+            if(failurePercent >= failureThreshold){
+                if(this.currentState.compareAndSet(CBStates.CLOSED, CBStates.OPEN)){
+                    this.lastWindowResetM.set(System.currentTimeMillis());
+                    this.totalRequestsInWindow.set(0);
+                    this.failureRequests.set(0);
+                }
+            }
+        }
+    }
+
+    public <T> T execute(Supplier<T> request){
+        T result = null;
+
+        if(isAllowed()){
+
+            try{
+                result = request.get();
+                onSuccess();
+            }catch(Exception e){
+                onFailure();
+            }
+        }
+
+        return result;
     }
 }

@@ -1,10 +1,6 @@
 
 public class OpenCBState implements ICBState{
-    private final CBStates state;
-
-    public HalfOpenCBState(){
-        this.state = CBStates.OPEN;
-    }
+    private final CBStates state = CBStates.OPEN;
 
     @Override 
     public CBStates getState(){return this.state;}
