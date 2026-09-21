@@ -10,11 +10,11 @@ public class HalfOpenCBState{
 
     @Override 
     public void close(CircuitBreaker context){
-        context.setState(new ClosedCBState());
+        context.setState(context.getClosedState());
     }
 
     @Override 
     public void open(CircuitBreaker context){
-        context.setState(new OpenCBState());
+        context.setState(context.getOpenState());
     }
 }

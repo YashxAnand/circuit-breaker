@@ -12,6 +12,6 @@ public class ClosedCBState implements ICBState{
 
     @Override
     public void open(CircuitBreaker context){
-        context.setState(new OpenCBState());
+        context.setState(context.getOpenState());
     }
 }

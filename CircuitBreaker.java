@@ -1,9 +1,13 @@
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Supplier;
 
 public class CircuitBreaker{
     private final AtomicReference<ICBState> currentState;
+    private final AtomicReference<ICBState> openState;
+    private final AtomicReference<ICBState> halfOpenState;
+    private final AtomicReference<ICBState> closedState;
     private AtomicLong lastWindowResetM;
     private final long windowTimeM;
     private AtomicLong totalRequestsInWindow;
@@ -56,7 +60,10 @@ public class CircuitBreaker{
     }
 
     private CircuitBreaker(Builder builder){
-        this.currentState = new AtomicReference<>(new ClosedCBState());
+        this.closedState = new AtomicReference<>(new ClosedCBState());
+        this.halfOpenState = new AtomicReference<>(new HalfOpenCBState());
+        this.openState = new AtomicReference<>(new OpenCBState());
+        this.currentState = new AtomicReference<>(closedState.get());
         this.lastWindowResetM = new AtomicLong(System.currentTimeMillis());
         this.windowTimeM = builder.windowTimeM;
         this.totalRequestsInWindow = new AtomicLong(0);
@@ -65,11 +72,16 @@ public class CircuitBreaker{
         this.failureThreshold = builder.failureThreshold;
         this.halfOpenPercent = builder.halfOpenPercent;
         this.openWindowTimeout = builder.openWindowTimeout;
-        this.lock = new ReentrantLock();
     }
 
-    public void setState(ICBState state){
-        this.currentState.set(state);
+    public AtomicReference<ICBState> getOpenState(){return this.openState;}
+
+    public AtomicReference<ICBState> getClosedState(){return this.closedState;}
+
+    public AtomicReference<ICBState> getHalfOpenState(){return this.halfOpenState;}
+
+    public void setState(AtomicReference<ICBState> state){
+        this.currentState.set(state.get());
     }
 
     private void checkWindowReset(){
@@ -85,7 +97,7 @@ public class CircuitBreaker{
                 failureRequests.set(0);
 
                 if(this.currentState.get().getState().equals(CBStates.OPEN))
-                    this.currentState.compareAndSet(CBStates.OPEN, CBStates.HALF_OPEN);
+                    this.currentState.compareAndSet(openState.get(), halfOpenState.get());
             }
         }
     }
@@ -98,7 +110,7 @@ public class CircuitBreaker{
             this.totalRequestsInWindow.incrementAndGet();
             return true;
         } else if(currentState.equals(CBStates.HALF_OPEN)){
-            int requestNumber = totalRequestsInWindow.incrementAndGet();
+            long requestNumber = totalRequestsInWindow.incrementAndGet();
             int allowedN = 100/halfOpenPercent;
 
             return (requestNumber%allowedN) == 0;
@@ -109,7 +121,7 @@ public class CircuitBreaker{
 
     private void onSuccess(){
         if(this.currentState.get().getState().equals(CBStates.HALF_OPEN)){
-            if(this.currentState.compareAndSet(CBStates.HALF_OPEN, CBStates.CLOSED)){
+            if(this.currentState.compareAndSet(halfOpenState.get(), closedState.get())){
                 this.lastWindowResetM.set(System.currentTimeMillis());
                 this.totalRequestsInWindow.set(0);
                 this.failureRequests.set(0);
@@ -121,11 +133,13 @@ public class CircuitBreaker{
         CBStates currState = this.currentState.get().getState();
 
         if(currState.equals(CBStates.HALF_OPEN)){
-            if(this.currentState.compareAndSet(currState, CBStates.OPEN)){
-                this.lastWindowResetM = System.currentTimeMillis;
+            if(this.currentState.compareAndSet(halfOpenState.get(), openState.get())){
+                this.lastWindowResetM.set(System.currentTimeMillis());
                 this.totalRequestsInWindow.set(0);
                 this.failureRequests.set(0);
             }
+
+            return;
         }
 
         //If closed
@@ -133,10 +147,11 @@ public class CircuitBreaker{
         long totalRequests = totalRequestsInWindow.get();
 
         if(totalRequestsInWindow.get() > minRequestCount){
-            int failurePercent = (failureCount * 100.0) / totalRequests;
+            int failurePercent = (failureCount * 100) / totalRequests;
 
             if(failurePercent >= failureThreshold){
-                if(this.currentState.compareAndSet(CBStates.CLOSED, CBStates.OPEN)){
+
+                if(this.currentState.compareAndSet(closedState.get(), openState.get())){
                     this.lastWindowResetM.set(System.currentTimeMillis());
                     this.totalRequestsInWindow.set(0);
                     this.failureRequests.set(0);
@@ -153,11 +168,13 @@ public class CircuitBreaker{
             try{
                 result = request.get();
                 onSuccess();
+                return result;
             }catch(Exception e){
                 onFailure();
+                throw e;
             }
         }
 
-        return result;
+        throw new CBOpenException("Circuit breaker is OPEN!");
     }
 }
